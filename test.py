@@ -30,7 +30,7 @@ model = {
 	'LSTM': models.LSTM,
 	'BiLSTM': models.BiLSTM,
 	'ContextAware': models.ContextAware,
-	# 'LSTM_SP': models.LSTM_SP
+	#'MRGE': models.MRGE,
 }
 
 con = config.Config(args)

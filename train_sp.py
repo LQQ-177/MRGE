@@ -25,10 +25,6 @@ parser.add_argument('--output_file', type = str, default = "result.json")
 
 args = parser.parse_args()
 model = {
-	# 'CNN3': models.CNN3,
-	# 'LSTM': models.LSTM,
-	# 'BiLSTM': models.BiLSTM,
-	# 'ContextAware': models.ContextAware,
 	'LSTM_SP': models.LSTM_SP
 }
 
