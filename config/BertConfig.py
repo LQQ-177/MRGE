@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import random
 from collections import defaultdict
 import torch.nn.functional as F
+import copy
 
 
 IGNORE_INDEX = -100
@@ -52,6 +53,9 @@ class BertConfig(object):
         self.pos_num = 2 * self.max_length
         self.entity_num = self.max_length
         self.relation_num = 97
+
+        self.dep_size = 300#依存表示大小
+        self.dep_rel_num = 38#依存关系种类
 
         self.coref_size = 20
         self.entity_type_size = 20
@@ -148,6 +152,8 @@ class BertConfig(object):
         self.data_train_bert_mask = np.load(os.path.join(self.data_path, prefix+'_bert_mask.npy'))
         self.data_train_bert_starts = np.load(os.path.join(self.data_path, prefix+'_bert_starts.npy'))
 
+        self.data_train_tree = json.load(open(os.path.join(self.data_path, prefix + '_tree_RNN.json')))
+
         print("Finish reading")
 
         self.train_len = ins_num = self.data_train_word.shape[0]
@@ -178,6 +184,7 @@ class BertConfig(object):
         self.data_test_bert_mask = np.load(os.path.join(self.data_path, prefix+'_bert_mask.npy'))
         self.data_test_bert_starts = np.load(os.path.join(self.data_path, prefix+'_bert_starts.npy'))
 
+        self.data_test_tree = json.load(open(os.path.join(self.data_path, prefix + '_tree_RNN.json')))
 
         self.test_len = self.data_test_word.shape[0]
         assert(self.test_len==len(self.test_file))
@@ -241,7 +248,6 @@ class BertConfig(object):
 
         relation_label = torch.LongTensor(self.batch_size, self.h_t_limit).cuda()
 
-
         ht_pair_pos = torch.LongTensor(self.batch_size, self.h_t_limit).cuda()
 
         sent_idxs = torch.LongTensor(self.batch_size, self.sent_limit, self.word_size).cuda()
@@ -271,6 +277,7 @@ class BertConfig(object):
 
             max_h_t_cnt = 1
 
+            context_trees = list()
 
             for i, index in enumerate(cur_batch):
                 #context_idxs[i].copy_(torch.from_numpy(self.data_train_word[index, :]))
@@ -281,6 +288,8 @@ class BertConfig(object):
 
                 context_masks[i].copy_(torch.from_numpy(self.data_train_bert_mask[index, :]))
                 context_starts[i].copy_(torch.from_numpy(self.data_train_bert_starts[index, :]))
+
+                context_trees.append(copy.deepcopy(self.data_train_tree[index]))
 
                 for j in range(self.max_length):
                     if self.data_train_word[index, j]==0:
@@ -387,6 +396,8 @@ class BertConfig(object):
                    'reverse_sent_idxs': reverse_sent_idxs[:cur_bsz, :max_c_len],
                    'context_masks': context_masks[:cur_bsz, :max_c_len].contiguous(),
                    'context_starts': context_starts[:cur_bsz, :max_c_len].contiguous(),
+
+                   'context_trees': context_trees,
                    }
 
     def get_test_batch(self):
@@ -432,6 +443,8 @@ class BertConfig(object):
 
             evi_nums = []
 
+            context_trees = list()
+
             for i, index in enumerate(cur_batch):
                 #context_idxs[i].copy_(torch.from_numpy(self.data_test_word[index, :]))
                 context_idxs[i].copy_(torch.from_numpy(self.data_test_bert_word[index, :]))
@@ -441,6 +454,8 @@ class BertConfig(object):
 
                 context_masks[i].copy_(torch.from_numpy(self.data_test_bert_mask[index, :]))
                 context_starts[i].copy_(torch.from_numpy(self.data_test_bert_starts[index, :]))
+
+                context_trees.append(copy.deepcopy(self.data_test_tree[index]))
 
                 idx2label = defaultdict(list)
                 ins = self.test_file[index]
@@ -518,6 +533,8 @@ class BertConfig(object):
                    'context_masks': context_masks[:cur_bsz, :max_c_len].contiguous(),
                    'context_starts': context_starts[:cur_bsz, :max_c_len].contiguous(),
                    'evi_num_set': evi_nums,
+
+                   'context_trees': context_trees,
                    }
 
     def train(self, model_pattern, model_name):
@@ -588,13 +605,15 @@ class BertConfig(object):
                 context_masks = data['context_masks']
                 context_starts = data['context_starts']
 
+                context_trees = data['context_trees']
+
 
                 dis_h_2_t = ht_pair_pos+10
                 dis_t_2_h = -ht_pair_pos+10
 
 
-                predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
-                loss = torch.sum(BCE(predict_re, relation_multi_label)*relation_mask.unsqueeze(2)) /  (self.relation_num * torch.sum(relation_mask))
+                predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths, h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts, context_trees)
+                loss = torch.sum(BCE(predict_re, relation_multi_label)*relation_mask.unsqueeze(2)) / (self.relation_num * torch.sum(relation_mask))
 
 
                 output = torch.argmax(predict_re, dim=-1)
@@ -702,15 +721,17 @@ class BertConfig(object):
                 titles = data['titles']
                 indexes = data['indexes']
 
+                context_trees = data['context_trees']
+
                 dis_h_2_t = ht_pair_pos+10
                 dis_t_2_h = -ht_pair_pos+10
 
                 if two_phase:
                     is_rel_exist = pretrain_model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
-                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts, context_trees)
 
                 predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
-                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts, context_trees)
 
                 predict_re = torch.sigmoid(predict_re)
 
@@ -944,11 +965,13 @@ class BertConfig(object):
                 titles = data['titles']
                 indexes = data['indexes']
 
+                context_trees = data['context_trees']
+
                 dis_h_2_t = ht_pair_pos+10
                 dis_t_2_h = -ht_pair_pos+10
 
                 predict_re = model(context_idxs, context_pos, context_ner, context_char_idxs, input_lengths,
-                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts)
+                                   h_mapping, t_mapping, relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts, context_trees)
 
 
                 predict_re = torch.sigmoid(predict_re)
