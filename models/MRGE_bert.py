@@ -43,7 +43,10 @@ class MRGE_bert(nn.Module):
         self.sent_att = nn.Softmax(dim=1)
         self.linear_doc = nn.Linear(bert_hidden_size+config.coref_size+config.entity_type_size, config.relation_num)
 
-        self.linear_temp = nn.Linear(bert_hidden_size+config.coref_size+config.entity_type_size, hidden_size)
+        self.tree_RNN = DepST_RNN(bert_hidden_size+config.coref_size+config.entity_type_size, config.dep_size, config.dep_rel_num)
+        #定义LSTM
+
+        self.linear_temp = nn.Linear(bert_hidden_size+config.coref_size+config.entity_type_size+config.dep_size, hidden_size)
 
         if self.use_distance:
             self.dis_embed = nn.Embedding(20, config.dis_size, padding_idx=10)
@@ -53,7 +56,7 @@ class MRGE_bert(nn.Module):
 
 
     def forward(self, context_idxs, pos, context_ner, context_char_idxs, context_lens, h_mapping, t_mapping,
-                relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts):
+                relation_mask, dis_h_2_t, dis_t_2_h, sent_idxs, sent_lengths, reverse_sent_idxs, context_masks, context_starts, context_tree):
         # para_size, char_size, bsz = context_idxs.size(1), context_char_idxs.size(2), context_idxs.size(0)
         # context_ch = self.char_emb(context_char_idxs.contiguous().view(-1, char_size)).view(bsz * para_size, char_size, -1)
         # context_ch = self.char_cnn(context_ch.permute(0, 2, 1).contiguous()).max(dim=-1)[0].view(bsz, para_size, -1)
@@ -87,12 +90,14 @@ class MRGE_bert(nn.Module):
         att_sent = self.sent_att(att_sent.squeeze(2))#(batch_size,k)
         #print(att_sent.size())
 
-        doc = torch.sum(torch.mul(sent.squeeze(2), att_sent.unsqueeze(2)), dim=1)##(batch_size,808)
+        doc = torch.sum(torch.mul(sent.squeeze(2), att_sent.unsqueeze(2)), dim=1)#(batch_size,808)
         doc = self.linear_doc(doc)#(batch_size,97)
         #print(doc.size())
 
-        #实例级（待写
-        context_output = self.linear_temp(context_output)#(batch_size,doc_len,128)
+        ent = self.tree_RNN(context_output, context_tree)
+        #调用LSTM
+
+        context_output = self.linear_temp(ent)#(batch_size,doc_len,128)
 
         #print(h_mapping.size())#(batch_size,re_num,doc_len)
         start_e_output = torch.matmul(h_mapping, context_output)#(batch_size,re_num,128)
@@ -112,6 +117,37 @@ class MRGE_bert(nn.Module):
         #print(predict_re[0].size())#(batch_size,re_num,97)
 
         return predict_re
+
+
+
+class DepST_RNN(nn.Module):
+    def __init__(self, node_size, dep_size, dep_rel_num):
+        super().__init__()
+        self.node_size = node_size#word+type+position
+        self.dep_size = dep_size#依存表示大小dependency
+        self.dep_rel_num = dep_rel_num#依存关系种类
+
+        self.dep_W = nn.ParameterList([nn.Parameter(torch.rand(self.dep_size, self.node_size+self.dep_size), requires_grad=True) for _ in range(self.dep_rel_num)])
+
+    def forward(self, context, tree):
+        child = torch.zeros(context.size(0), context.size(1), self.dep_size).cuda()#记录累积的子树表示
+
+        batch_size = context.size(0)
+        for batch in range(batch_size):
+            for layer in range(len(tree[batch]), 0, -1):
+                child_num = dict()#记录子节点有几个
+                for item in tree[batch][str(layer)]:
+                    child[batch,item['head']] = torch.sum(torch.mul(self.dep_W[item['rel']], torch.cat([context[batch,item['tail']], child[batch,item['tail']]])), dim = 1)
+                    if item['head'] not in child_num:
+                        child_num[item['head']] = 0
+                    child_num[item['head']] += 1
+                for i in child_num.keys():
+                    child[batch, int(i)] /= child_num[i]
+
+        context = torch.cat([context, child] ,dim=-1)
+
+        return context
+
 
 
 class LockedDropout(nn.Module):
@@ -187,7 +223,6 @@ class EncoderRNN(nn.Module):
         if self.concat:
             return torch.cat(outputs, dim=2)
         return outputs[-1]
-
 
 
 
